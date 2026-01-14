@@ -239,7 +239,7 @@ def main():
     # Create optimizer
     optimizer = AdamW(
         model.parameters(),
-        lr=train_cfg["lr"],
+        lr=float(train_cfg["lr"]),
         weight_decay=train_cfg["weight_decay"],
         betas=(0.9, 0.95),
     )

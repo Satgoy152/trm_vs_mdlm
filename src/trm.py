@@ -168,7 +168,7 @@ class TRM(nn.Module):
                 # Q-head loss (optional): predict if predictions are correct
                 preds = masked_logits.argmax(dim=-1)
                 target_accuracy = (preds == masked_targets).float().mean()
-                q_loss = F.binary_cross_entropy(halt_prob.mean(), target_accuracy.detach())
+                q_loss = F.binary_cross_entropy_with_logits(logits.mean(), target_accuracy.detach())
 
                 step_loss = ce_loss + 0.1 * q_loss
                 total_loss = total_loss + step_loss
