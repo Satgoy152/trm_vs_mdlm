@@ -98,7 +98,7 @@ class TRM(nn.Module):
             attention_mask: [B, L] padding mask
 
         Returns:
-            (y, z, logits, halt_prob): detached y/z, final logits, halt probability
+            (y, z, logits, halt_logit): detached y/z, final logits, halt logit
         """
         # T-1 iterations without grad
         if T > 1:
@@ -111,10 +111,10 @@ class TRM(nn.Module):
 
         # Compute outputs
         logits = self.output_head(y)
-        halt_prob = self.q_head(y, attention_mask)
+        halt_logit = self.q_head(y, attention_mask)
 
         # Detach for next supervision step
-        return y.detach(), z.detach(), logits, halt_prob
+        return y.detach(), z.detach(), logits, halt_logit
 
     def forward(self, input_ids: Tensor, attention_mask: Tensor) -> dict:
         """
@@ -153,8 +153,8 @@ class TRM(nn.Module):
         total_accuracy = 0.0
         actual_steps = 0
 
-        for step in range(self.N_sup):
-            y, z, logits, halt_prob = self.deep_recursion(
+        for sup_step in range(self.N_sup):
+            y, z, logits, halt_logit = self.deep_recursion(
                 x, y, z, self.n, self.T, attention_mask
             )
 
@@ -168,7 +168,9 @@ class TRM(nn.Module):
                 # Q-head loss (optional): predict if predictions are correct
                 preds = masked_logits.argmax(dim=-1)
                 target_accuracy = (preds == masked_targets).float().mean()
-                q_loss = F.binary_cross_entropy_with_logits(logits.mean(), target_accuracy.detach())
+                q_loss = F.binary_cross_entropy_with_logits(
+                    halt_logit.mean(), target_accuracy.detach()
+                )
 
                 step_loss = ce_loss + 0.1 * q_loss
                 total_loss = total_loss + step_loss
@@ -176,7 +178,8 @@ class TRM(nn.Module):
                 actual_steps += 1
 
                 # Optional early stopping in training (when confident)
-                if halt_prob.mean() > 0.5 and step > 0:
+                halt_prob = torch.sigmoid(halt_logit.mean())
+                if halt_prob > 0.5 and sup_step > 0:
                     break
 
         # Average over supervision steps

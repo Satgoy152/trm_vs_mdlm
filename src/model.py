@@ -189,7 +189,7 @@ class OutputHead(nn.Module):
 class QHead(nn.Module):
     """
     Halting prediction head for TRM.
-    Mean-pools sequence, projects to scalar, applies sigmoid.
+    Mean-pools sequence, projects to scalar logit.
 
     Args:
         d_model: Hidden dimension
@@ -217,7 +217,7 @@ class QHead(nn.Module):
             attention_mask: [B, L] optional mask for pooling
 
         Returns:
-            halt_prob: [B]
+            halt_logit: [B] raw logits (apply sigmoid for probability)
         """
         if attention_mask is not None:
             # Masked mean pooling
@@ -226,7 +226,7 @@ class QHead(nn.Module):
         else:
             pooled = hidden.mean(dim=1)
 
-        return torch.sigmoid(self.proj(pooled).squeeze(-1))
+        return self.proj(pooled).squeeze(-1)
 
 
 if __name__ == "__main__":
@@ -268,9 +268,10 @@ if __name__ == "__main__":
 
     # Test QHead
     q_head = QHead(D)
-    halt_prob = q_head(hidden, attention_mask)
-    print(f"QHead: input {hidden.shape} -> output {halt_prob.shape}")
-    assert halt_prob.shape == (B,)
+    halt_logit = q_head(hidden, attention_mask)
+    print(f"QHead: input {hidden.shape} -> output {halt_logit.shape}")
+    assert halt_logit.shape == (B,)
+    halt_prob = torch.sigmoid(halt_logit)
     assert (halt_prob >= 0).all() and (halt_prob <= 1).all()
 
     # Count parameters
