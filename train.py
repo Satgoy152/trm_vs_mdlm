@@ -7,11 +7,13 @@ Usage:
 """
 
 import argparse
-import math
+import csv
 import os
 import time
+from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import yaml
 from accelerate import Accelerator
 from accelerate.utils import set_seed
@@ -43,6 +45,133 @@ def get_scheduler(optimizer, warmup_steps: int, total_steps: int):
     )
 
 
+def estimate_flops_per_step(config: dict, method: str) -> int:
+    """
+    Estimate FLOPs per training step.
+
+    For transformer: ~6 * N * D^2 * L per layer for forward, 2x for backward
+    Plus attention: ~4 * N * L^2 * D per layer
+    """
+    model_cfg = config["model"]
+    n_layers = model_cfg["n_layers"]
+    d_model = model_cfg["d_model"]
+    d_ff = model_cfg["d_ff"]
+    seq_len = config["data"]["seq_len"]
+    batch_size = config["training"]["batch_size"]
+    grad_accum = config["training"]["grad_accum_steps"]
+
+    # Per-token FLOPs for one forward pass through transformer
+    # Attention: 4 * L * D (Q, K, V projections + output)
+    # FFN: 2 * D * d_ff
+    # Total per layer: ~12 * D^2 + 8 * D * d_ff (approximate)
+    flops_per_token_per_layer = 12 * d_model * d_model + 8 * d_model * d_ff
+
+    # Attention FLOPs: 2 * L * D per head for QK^T and attention @ V
+    attn_flops_per_token = 4 * seq_len * d_model
+
+    flops_per_token = n_layers * (flops_per_token_per_layer + attn_flops_per_token)
+
+    # Forward + backward = 3x forward FLOPs
+    flops_per_token *= 3
+
+    # Total tokens per step
+    tokens_per_step = batch_size * seq_len * grad_accum
+
+    base_flops = flops_per_token * tokens_per_step
+
+    # TRM has multiple forward passes per step
+    if method == "trm":
+        trm_cfg = config["trm"]
+        # N_sup supervision steps, each with T deep recursions, each with n+1 backbone calls
+        passes_per_step = trm_cfg["N_sup"] * trm_cfg["T"] * (trm_cfg["n"] + 1)
+        base_flops *= passes_per_step
+
+    return base_flops
+
+
+@torch.no_grad()
+def evaluate(model, eval_dataloader, config: dict, accelerator, num_batches: int) -> dict:
+    """Run evaluation on a subset of data."""
+    model.eval()
+    mask_token_id = config["data"]["mask_token_id"]
+
+    total_loss = 0.0
+    total_correct = 0
+    total_tokens = 0
+
+    eval_iter = iter(eval_dataloader)
+    for _ in range(num_batches):
+        try:
+            batch = next(eval_iter)
+        except StopIteration:
+            break
+
+        input_ids = batch["input_ids"]
+        attention_mask = batch["attention_mask"]
+        B, L = input_ids.shape
+
+        # Use fixed mask ratio for eval consistency
+        mask_ratio = 0.15
+        rand = torch.rand(B, L, device=input_ids.device)
+        mask = (rand < mask_ratio) & (attention_mask == 1)
+
+        targets = input_ids.clone()
+        masked_input = input_ids.clone()
+        masked_input[mask] = mask_token_id
+
+        # Forward pass
+        x = model.module.embeddings(masked_input) if hasattr(model, 'module') else model.embeddings(masked_input)
+        backbone = model.module.backbone if hasattr(model, 'module') else model.backbone
+        output_head = model.module.output_head if hasattr(model, 'module') else model.output_head
+
+        hidden = backbone(x, attention_mask)
+        logits = output_head(hidden)
+
+        masked_logits = logits[mask]
+        masked_targets = targets[mask]
+
+        if masked_logits.numel() > 0:
+            loss = F.cross_entropy(masked_logits, masked_targets, reduction="sum")
+            preds = masked_logits.argmax(dim=-1)
+            correct = (preds == masked_targets).sum()
+
+            total_loss += accelerator.gather(loss).sum().item()
+            total_correct += accelerator.gather(correct).sum().item()
+            total_tokens += accelerator.gather(torch.tensor(masked_logits.size(0), device=input_ids.device)).sum().item()
+
+    model.train()
+
+    if total_tokens > 0:
+        return {
+            "eval_loss": total_loss / total_tokens,
+            "eval_accuracy": total_correct / total_tokens,
+            "eval_perplexity": torch.exp(torch.tensor(total_loss / total_tokens)).item(),
+        }
+    return {"eval_loss": 0, "eval_accuracy": 0, "eval_perplexity": 0}
+
+
+class CSVLogger:
+    """Simple CSV logger for training metrics."""
+
+    def __init__(self, filepath: str, fieldnames: list[str]):
+        self.filepath = filepath
+        self.fieldnames = fieldnames
+
+        # Create directory if needed
+        Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+
+        # Write header
+        with open(filepath, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+
+    def log(self, row: dict):
+        """Append a row to the CSV."""
+        with open(self.filepath, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self.fieldnames)
+            writer.writerow(row)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train TRM or MDLM")
     parser.add_argument(
@@ -63,6 +192,12 @@ def main():
         type=str,
         default=None,
         help="Path to checkpoint to resume from",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="outputs",
+        help="Directory for logs and checkpoints",
     )
     args = parser.parse_args()
 
@@ -88,13 +223,18 @@ def main():
     else:
         model = MDLM(config)
 
+    # Calculate FLOPs per step
+    flops_per_step = estimate_flops_per_step(config, args.method)
+
     # Log model info
     total_params = sum(p.numel() for p in model.parameters())
     accelerator.print(f"Method: {args.method}")
     accelerator.print(f"Total parameters: {total_params:,}")
+    accelerator.print(f"Estimated FLOPs per step: {flops_per_step:,}")
 
-    # Create dataloader
+    # Create dataloaders
     dataloader = get_dataloader(config, accelerator)
+    eval_dataloader = get_dataloader(config, accelerator)  # Separate iterator for eval
 
     # Create optimizer
     optimizer = AdamW(
@@ -120,6 +260,7 @@ def main():
     model, optimizer, dataloader, scheduler = accelerator.prepare(
         model, optimizer, dataloader, scheduler
     )
+    eval_dataloader = accelerator.prepare(eval_dataloader)
 
     # Initialize wandb
     if accelerator.is_main_process:
@@ -129,15 +270,30 @@ def main():
             init_kwargs={"wandb": {"name": f"{args.method}-{time.strftime('%Y%m%d-%H%M%S')}"}},
         )
 
+    # Setup CSV logger (main process only)
+    csv_logger = None
+    if accelerator.is_main_process:
+        csv_path = f"{args.output_dir}/{args.method}/metrics.csv"
+        csv_logger = CSVLogger(
+            csv_path,
+            fieldnames=[
+                "step", "tokens_seen", "flops", "wall_time",
+                "train_loss", "train_accuracy", "lr",
+                "eval_loss", "eval_accuracy", "eval_perplexity",
+            ],
+        )
+        accelerator.print(f"Logging metrics to {csv_path}")
+
     # Resume from checkpoint if specified
     start_step = 0
     tokens_seen = 0
+    total_flops = 0
     if args.resume:
         accelerator.load_state(args.resume)
-        # Try to restore step count from checkpoint path
         if "step_" in args.resume:
             start_step = int(args.resume.split("step_")[-1])
             tokens_seen = start_step * tokens_per_step
+            total_flops = start_step * flops_per_step
         accelerator.print(f"Resumed from step {start_step}")
 
     # Training loop
@@ -149,6 +305,12 @@ def main():
     accelerator.print(f"Total tokens target: {train_cfg['total_tokens']:,}")
     accelerator.print(f"Tokens per step: {tokens_per_step:,}")
     accelerator.print(f"Total steps: {total_steps:,}")
+    accelerator.print(f"Log train every: {train_cfg['log_train_every']} steps")
+    accelerator.print(f"Log eval every: {train_cfg['log_eval_every']} steps")
+
+    # Track recent losses for smoothing
+    recent_losses = []
+    recent_accuracies = []
 
     for batch in dataloader:
         with accelerator.accumulate(model):
@@ -156,7 +318,6 @@ def main():
             loss = outputs["loss"]
             accelerator.backward(loss)
 
-            # Gradient clipping
             if accelerator.sync_gradients:
                 accelerator.clip_grad_norm_(model.parameters(), 1.0)
 
@@ -164,45 +325,79 @@ def main():
             scheduler.step()
             optimizer.zero_grad()
 
-        # Update tokens seen
         if accelerator.sync_gradients:
             step += 1
             tokens_seen += tokens_per_step
+            total_flops += flops_per_step
 
-            # Logging
-            if step % train_cfg["log_every"] == 0:
-                wall_time = time.time() - start_time
-                tokens_per_sec = tokens_seen / wall_time if wall_time > 0 else 0
+            # Track recent metrics
+            recent_losses.append(loss.item())
+            recent_accuracies.append(outputs["accuracy"].item())
+            if len(recent_losses) > 100:
+                recent_losses.pop(0)
+                recent_accuracies.pop(0)
 
-                log_dict = {
-                    "loss": loss.item(),
-                    "accuracy": outputs["accuracy"].item(),
-                    "lr": scheduler.get_last_lr()[0],
-                    "tokens_seen": tokens_seen,
-                    "wall_time": wall_time,
-                    "tokens_per_sec": tokens_per_sec,
-                    "step": step,
-                }
+            wall_time = time.time() - start_time
 
-                # Add method-specific metrics
-                if args.method == "trm" and "n_sup_steps" in outputs:
-                    log_dict["n_sup_steps"] = outputs["n_sup_steps"]
-                if args.method == "mdlm" and "mask_ratio" in outputs:
-                    log_dict["mask_ratio"] = outputs["mask_ratio"]
-
-                accelerator.log(log_dict, step=step)
+            # Log train metrics every log_train_every steps
+            if step % train_cfg["log_train_every"] == 0:
+                avg_loss = sum(recent_losses) / len(recent_losses)
+                avg_acc = sum(recent_accuracies) / len(recent_accuracies)
 
                 accelerator.print(
-                    f"Step {step} | Loss: {loss.item():.4f} | "
-                    f"Acc: {outputs['accuracy'].item():.4f} | "
+                    f"Step {step} | Loss: {avg_loss:.4f} | "
+                    f"Acc: {avg_acc:.4f} | "
                     f"Tokens: {tokens_seen:,} | "
-                    f"Time: {wall_time:.1f}s | "
-                    f"Tok/s: {tokens_per_sec:.0f}"
+                    f"FLOPs: {total_flops:.2e}"
                 )
+
+                # Log to wandb
+                log_dict = {
+                    "train_loss": avg_loss,
+                    "train_accuracy": avg_acc,
+                    "lr": scheduler.get_last_lr()[0],
+                    "tokens_seen": tokens_seen,
+                    "flops": total_flops,
+                    "wall_time": wall_time,
+                }
+                accelerator.log(log_dict, step=step)
+
+            # Log eval metrics every log_eval_every steps
+            if step % train_cfg["log_eval_every"] == 0:
+                eval_metrics = evaluate(
+                    model, eval_dataloader, config, accelerator,
+                    num_batches=train_cfg["eval_batches"],
+                )
+
+                accelerator.print(
+                    f"  Eval | Loss: {eval_metrics['eval_loss']:.4f} | "
+                    f"Acc: {eval_metrics['eval_accuracy']:.4f} | "
+                    f"PPL: {eval_metrics['eval_perplexity']:.2f}"
+                )
+
+                # Log to wandb
+                accelerator.log(eval_metrics, step=step)
+
+                # Log to CSV (main process only)
+                if csv_logger is not None:
+                    avg_loss = sum(recent_losses) / len(recent_losses)
+                    avg_acc = sum(recent_accuracies) / len(recent_accuracies)
+                    csv_logger.log({
+                        "step": step,
+                        "tokens_seen": tokens_seen,
+                        "flops": total_flops,
+                        "wall_time": wall_time,
+                        "train_loss": avg_loss,
+                        "train_accuracy": avg_acc,
+                        "lr": scheduler.get_last_lr()[0],
+                        "eval_loss": eval_metrics["eval_loss"],
+                        "eval_accuracy": eval_metrics["eval_accuracy"],
+                        "eval_perplexity": eval_metrics["eval_perplexity"],
+                    })
 
             # Checkpointing
             if step % train_cfg["save_every"] == 0:
-                checkpoint_dir = f"checkpoints/{args.method}/step_{step}"
+                checkpoint_dir = f"{args.output_dir}/{args.method}/checkpoints/step_{step}"
                 accelerator.save_state(checkpoint_dir)
                 accelerator.print(f"Saved checkpoint to {checkpoint_dir}")
 
@@ -211,18 +406,41 @@ def main():
                 accelerator.print(f"Reached {tokens_seen:,} tokens, stopping training")
                 break
 
+    # Final evaluation
+    final_eval = evaluate(
+        model, eval_dataloader, config, accelerator,
+        num_batches=train_cfg["eval_batches"] * 2,
+    )
+    accelerator.print(f"Final eval | Loss: {final_eval['eval_loss']:.4f} | "
+                     f"Acc: {final_eval['eval_accuracy']:.4f}")
+
     # Final save
-    final_checkpoint = f"checkpoints/{args.method}/final"
+    final_checkpoint = f"{args.output_dir}/{args.method}/checkpoints/final"
     accelerator.save_state(final_checkpoint)
     accelerator.print(f"Saved final checkpoint to {final_checkpoint}")
 
-    # End tracking
+    # Log final metrics to CSV
+    if csv_logger is not None:
+        csv_logger.log({
+            "step": step,
+            "tokens_seen": tokens_seen,
+            "flops": total_flops,
+            "wall_time": time.time() - start_time,
+            "train_loss": sum(recent_losses) / len(recent_losses) if recent_losses else 0,
+            "train_accuracy": sum(recent_accuracies) / len(recent_accuracies) if recent_accuracies else 0,
+            "lr": scheduler.get_last_lr()[0],
+            "eval_loss": final_eval["eval_loss"],
+            "eval_accuracy": final_eval["eval_accuracy"],
+            "eval_perplexity": final_eval["eval_perplexity"],
+        })
+
     accelerator.end_training()
 
     total_time = time.time() - start_time
-    accelerator.print(f"Training complete!")
+    accelerator.print(f"\nTraining complete!")
     accelerator.print(f"Total time: {total_time:.1f}s")
     accelerator.print(f"Total tokens: {tokens_seen:,}")
+    accelerator.print(f"Total FLOPs: {total_flops:.2e}")
     accelerator.print(f"Average tokens/sec: {tokens_seen / total_time:.0f}")
 
 
