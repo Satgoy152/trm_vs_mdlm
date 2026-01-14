@@ -1,0 +1,41 @@
+# Model
+model:
+  n_layers: 12
+  n_heads: 12
+  d_model: 768
+  d_ff: 3072
+  vocab_size: 50257  # GPT-2 vocab
+  max_seq_len: 512
+  dropout: 0.1
+
+# Data
+data:
+  dataset: "HuggingFaceFW/fineweb-edu"
+  subset: "sample-10BT"
+  tokenizer: "gpt2"
+  seq_len: 512
+  mask_token_id: 50256  # Use <|endoftext|> as mask
+
+# Training (shared)
+training:
+  total_tokens: 2_500_000_000
+  batch_size: 32
+  lr: 1e-4
+  weight_decay: 0.1
+  warmup_steps: 2000
+  grad_accum_steps: 4
+  log_every: 100
+  save_every: 5000
+  seed: 42
+
+# TRM-specific
+trm:
+  n: 6           # latent recursions per deep step
+  T: 3           # deep recursions (T-1 no_grad, 1 with grad)
+  N_sup: 4       # supervision steps per batch
+  mask_ratio: 0.5
+
+# MDLM-specific
+mdlm:
+  mask_ratio_min: 0.15
+  mask_ratio_max: 1.0

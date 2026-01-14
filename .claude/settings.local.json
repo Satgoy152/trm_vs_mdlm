@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv add torch transformers datasets accelerate wandb pyyaml tqdm)",
+      "Bash(cd:*)",
+      "Bash(uv run python src/model.py)",
+      "Bash(uv run python src/mdlm.py)",
+      "Bash(uv run python -c \"\nimport sys\nsys.path.insert\\(0, ''.''\\)\n\nimport yaml\nimport torch\nfrom src.trm import TRM\n\nwith open\\(''config.yaml''\\) as f:\n    config = yaml.safe_load\\(f\\)\n\n# Use smaller values for testing\nconfig[''trm''][''n''] = 1\nconfig[''trm''][''T''] = 1\nconfig[''trm''][''N_sup''] = 1\n\nB, L = 2, 64\nV = config[''model''][''vocab_size'']\n\nmodel = TRM\\(config\\)\n\ninput_ids = torch.randint\\(0, V, \\(B, L\\)\\)\nattention_mask = torch.ones\\(B, L\\)\n\noutputs = model\\(input_ids, attention_mask\\)\nprint\\(f''Loss: {outputs[\"\"loss\"\"].item\\(\\):.4f}''\\)\nprint\\(f''Accuracy: {outputs[\"\"accuracy\"\"].item\\(\\):.4f}''\\)\nprint\\(f''N_sup steps: {outputs[\"\"n_sup_steps\"\"]}''\\)\n\noutputs[''loss''].backward\\(\\)\nprint\\(''Backward pass successful''\\)\n\n# Test generation\ngenerated = model.generate\\(batch_size=1, seq_len=32, steps=2\\)\nprint\\(f''Generated shape: {generated.shape}''\\)\n\ntotal_params = sum\\(p.numel\\(\\) for p in model.parameters\\(\\)\\)\nprint\\(f''Total parameters: {total_params:,}''\\)\n\nprint\\(''TRM test passed!''\\)\n\")"
+    ]
+  }
+}
