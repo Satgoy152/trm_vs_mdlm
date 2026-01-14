@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 import yaml
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
@@ -207,11 +207,17 @@ def main():
 
     train_cfg = config["training"]
 
+    # TRM uses no_grad for T-1 iterations and detaches between supervision steps,
+    # which means not all parameters receive gradients every step. Enable
+    # find_unused_parameters for TRM to handle this.
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=(args.method == "trm"))
+
     # Initialize accelerator
     accelerator = Accelerator(
         gradient_accumulation_steps=train_cfg["grad_accum_steps"],
         log_with="wandb",
         mixed_precision="bf16",
+        kwargs_handlers=[ddp_kwargs],
     )
 
     # Set seed for reproducibility
