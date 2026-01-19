@@ -202,7 +202,7 @@ def evaluate_trm(model, eval_dataloader, config: dict, accelerator, num_batches:
         logits = m.output_head(y)  # [B, y_len, V]
 
         # Compute metrics
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target_ids.view(-1), reduction="sum")
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), target_ids.reshape(-1), reduction="sum")
         preds = logits.argmax(dim=-1)
         correct = (preds == target_ids).sum()
 

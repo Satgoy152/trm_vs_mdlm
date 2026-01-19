@@ -200,8 +200,8 @@ class TRM(nn.Module):
             # Compute loss: predict target_ids from y logits
             # logits: [B, y_len, V], target_ids: [B, y_len]
             ce_loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                target_ids.view(-1),
+                logits.reshape(-1, logits.size(-1)),
+                target_ids.reshape(-1),
             )
 
             # Compute accuracy
