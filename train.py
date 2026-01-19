@@ -90,8 +90,8 @@ def estimate_flops_per_step(config: dict, method: str) -> int:
 
 
 @torch.no_grad()
-def evaluate(model, eval_dataloader, config: dict, accelerator, num_batches: int) -> dict:
-    """Run evaluation on a subset of data."""
+def evaluate_mdlm(model, eval_dataloader, config: dict, accelerator, num_batches: int) -> dict:
+    """Run evaluation for MDLM (masked language modeling)."""
     model.eval()
     mask_token_id = config["data"]["mask_token_id"]
 
@@ -120,12 +120,10 @@ def evaluate(model, eval_dataloader, config: dict, accelerator, num_batches: int
         masked_input[mask] = mask_token_id
 
         # Forward pass
-        x = model.module.embeddings(masked_input) if hasattr(model, 'module') else model.embeddings(masked_input)
-        backbone = model.module.backbone if hasattr(model, 'module') else model.backbone
-        output_head = model.module.output_head if hasattr(model, 'module') else model.output_head
-
-        hidden = backbone(x, attention_mask)
-        logits = output_head(hidden)
+        m = model.module if hasattr(model, 'module') else model
+        x = m.embeddings(masked_input)
+        hidden = m.backbone(x, attention_mask)
+        logits = m.output_head(hidden)
 
         masked_logits = logits[mask]
         masked_targets = targets[mask]
@@ -148,6 +146,87 @@ def evaluate(model, eval_dataloader, config: dict, accelerator, num_batches: int
             "eval_perplexity": torch.exp(torch.tensor(total_loss / total_tokens)).item(),
         }
     return {"eval_loss": 0, "eval_accuracy": 0, "eval_perplexity": 0}
+
+
+@torch.no_grad()
+def evaluate_trm(model, eval_dataloader, config: dict, accelerator, num_batches: int) -> dict:
+    """Run evaluation for TRM (prefix prediction)."""
+    model.eval()
+    trm_cfg = config["trm"]
+    y_len = trm_cfg["y_len"]
+    min_prefix = trm_cfg["min_prefix"]
+
+    total_loss = 0.0
+    total_correct = 0
+    total_tokens = 0
+
+    eval_iter = iter(eval_dataloader)
+    for _ in range(num_batches):
+        try:
+            batch = next(eval_iter)
+        except StopIteration:
+            break
+
+        input_ids = batch["input_ids"]
+        attention_mask = batch["attention_mask"]
+        B, L = input_ids.shape
+        device = input_ids.device
+
+        # Use fixed prefix length for eval consistency (middle of range)
+        max_prefix = L - y_len
+        if max_prefix < min_prefix:
+            continue
+        prefix_len = (min_prefix + max_prefix) // 2
+
+        # Split into prefix and target
+        prefix_ids = input_ids[:, :prefix_len]
+        target_ids = input_ids[:, prefix_len:prefix_len + y_len]
+
+        # Get model (unwrap DDP if needed)
+        m = model.module if hasattr(model, 'module') else model
+
+        # Embed prefix
+        x = m.embeddings(prefix_ids)
+
+        # Initialize y and z
+        y = m.y_init.expand(B, -1, -1) + m.y_pos
+        z = m.z_init.expand(B, -1, -1) + m.z_pos
+
+        # Create attention mask
+        attn_mask = m._create_attention_mask(prefix_len, B, device)
+
+        # Single pass through latent recursion (no deep supervision for eval)
+        y, z = m.latent_recursion(x, y, z, m.n, attn_mask)
+
+        # Get predictions
+        logits = m.output_head(y)  # [B, y_len, V]
+
+        # Compute metrics
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target_ids.view(-1), reduction="sum")
+        preds = logits.argmax(dim=-1)
+        correct = (preds == target_ids).sum()
+
+        total_loss += accelerator.gather(loss).sum().item()
+        total_correct += accelerator.gather(correct).sum().item()
+        total_tokens += accelerator.gather(torch.tensor(B * y_len, device=device)).sum().item()
+
+    model.train()
+
+    if total_tokens > 0:
+        return {
+            "eval_loss": total_loss / total_tokens,
+            "eval_accuracy": total_correct / total_tokens,
+            "eval_perplexity": torch.exp(torch.tensor(total_loss / total_tokens)).item(),
+        }
+    return {"eval_loss": 0, "eval_accuracy": 0, "eval_perplexity": 0}
+
+
+def evaluate(model, eval_dataloader, config: dict, accelerator, num_batches: int, method: str) -> dict:
+    """Run evaluation based on method type."""
+    if method == "trm":
+        return evaluate_trm(model, eval_dataloader, config, accelerator, num_batches)
+    else:
+        return evaluate_mdlm(model, eval_dataloader, config, accelerator, num_batches)
 
 
 class CSVLogger:
@@ -373,6 +452,7 @@ def main():
                 eval_metrics = evaluate(
                     model, eval_dataloader, config, accelerator,
                     num_batches=train_cfg["eval_batches"],
+                    method=args.method,
                 )
 
                 accelerator.print(
@@ -416,6 +496,7 @@ def main():
     final_eval = evaluate(
         model, eval_dataloader, config, accelerator,
         num_batches=train_cfg["eval_batches"] * 2,
+        method=args.method,
     )
     accelerator.print(f"Final eval | Loss: {final_eval['eval_loss']:.4f} | "
                      f"Acc: {final_eval['eval_accuracy']:.4f}")

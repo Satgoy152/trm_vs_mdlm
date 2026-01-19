@@ -35,7 +35,9 @@ trm:
   n: 6           # latent recursions per deep step
   T: 3           # deep recursions (T-1 no_grad, 1 with grad)
   N_sup: 4       # supervision steps per batch
-  mask_ratio: 0.5
+  y_len: 64      # prediction sequence length (tokens to predict)
+  z_len: 32      # latent reasoning state length
+  min_prefix: 64 # minimum prefix length
 
 # MDLM-specific
 mdlm:
