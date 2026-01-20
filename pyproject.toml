@@ -1,7 +1,7 @@
 [project]
-name = "trm-vs-mdlm"
+name = "mdlm-training"
 version = "0.1.0"
-description = "TRM vs MDLM training comparison for masked language modeling"
+description = "MDLM training for masked language modeling"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

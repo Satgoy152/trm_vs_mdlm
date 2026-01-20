@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=train_trm_2.5b
-#SBATCH --output=train_trm_2.5b%j.out
-#SBATCH --error=train_trm_2.5b%j.err
+#SBATCH --job-name=train_mdlm_2.5b
+#SBATCH --output=train_mdlm_2.5b%j.out
+#SBATCH --error=train_mdlm_2.5b%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
@@ -14,4 +14,4 @@
 source /home/sagoyal/research/trm_vs_mdlm/.venv/bin/activate
 
 # Already in the right directory, just run the command
-accelerate launch --num_processes=4 --mixed_precision=bf16 train.py --method trm --output_dir outputs
+accelerate launch --num_processes=4 --mixed_precision=bf16 train.py --output_dir outputs

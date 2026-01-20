@@ -1,9 +1,8 @@
 """
-Evaluation script for TRM and MDLM models.
+Evaluation script for MDLM model.
 
 Usage:
-    python eval.py --checkpoint path/to/checkpoint --method trm
-    python eval.py --checkpoint path/to/checkpoint --method mdlm
+    python eval.py --checkpoint path/to/checkpoint
 """
 
 import argparse
@@ -18,7 +17,6 @@ from transformers import AutoTokenizer
 
 from src.data import get_dataloader
 from src.mdlm import MDLM
-from src.trm import TRM
 
 
 def evaluate_reconstruction(
@@ -119,7 +117,7 @@ def generate_samples(
     Generate text samples from scratch.
 
     Args:
-        model: TRM or MDLM model
+        model: MDLM model
         tokenizer: Tokenizer for decoding
         n_samples: Number of samples to generate
         seq_len: Length of generated sequences
@@ -144,19 +142,12 @@ def generate_samples(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate TRM or MDLM")
+    parser = argparse.ArgumentParser(description="Evaluate MDLM")
     parser.add_argument(
         "--checkpoint",
         type=str,
         required=True,
         help="Path to checkpoint",
-    )
-    parser.add_argument(
-        "--method",
-        type=str,
-        required=True,
-        choices=["trm", "mdlm"],
-        help="Model type",
     )
     parser.add_argument(
         "--config",
@@ -193,10 +184,7 @@ def main():
     print(f"Using device: {device}")
 
     # Create model
-    if args.method == "trm":
-        model = TRM(config)
-    else:
-        model = MDLM(config)
+    model = MDLM(config)
 
     # Load checkpoint
     accelerator = Accelerator()

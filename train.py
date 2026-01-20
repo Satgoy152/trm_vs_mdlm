@@ -1,9 +1,8 @@
 """
-Unified training script for TRM vs MDLM comparison.
+Training script for MDLM (Masked Diffusion Language Model).
 
 Usage:
-    accelerate launch train.py --method trm
-    accelerate launch train.py --method mdlm
+    accelerate launch train.py
 """
 
 import argparse
@@ -22,7 +21,6 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from src.data import get_dataloader
 from src.mdlm import MDLM
-from src.trm import TRM
 
 
 def get_scheduler(optimizer, warmup_steps: int, total_steps: int):
@@ -45,9 +43,9 @@ def get_scheduler(optimizer, warmup_steps: int, total_steps: int):
     )
 
 
-def estimate_flops_per_step(config: dict, method: str) -> int:
+def estimate_flops_per_step(config: dict) -> int:
     """
-    Estimate FLOPs per training step.
+    Estimate FLOPs per training step for MDLM.
 
     For transformer: ~6 * N * D^2 * L per layer for forward, 2x for backward
     Plus attention: ~4 * N * L^2 * D per layer
@@ -79,18 +77,18 @@ def estimate_flops_per_step(config: dict, method: str) -> int:
 
     base_flops = flops_per_token * tokens_per_step
 
-    # TRM has multiple forward passes per step
-    if method == "trm":
-        trm_cfg = config["trm"]
-        # N_sup supervision steps, each with T deep recursions, each with n+1 backbone calls
-        passes_per_step = trm_cfg["N_sup"] * trm_cfg["T"] * (trm_cfg["n"] + 1)
-        base_flops *= passes_per_step
-
     return base_flops
 
 
 @torch.no_grad()
 def evaluate_mdlm(model, eval_dataloader, config: dict, accelerator, num_batches: int) -> dict:
+    """Run evaluation for MDLM (masked language modeling)."""
+    model.eval()
+    mask_token_id = config["data"]["mask_token_id"]
+
+    total_loss = 0.0
+    total_correct = 0
+    total_to(model, eval_dataloader, config: dict, accelerator, num_batches: int) -> dict:
     """Run evaluation for MDLM (masked language modeling)."""
     model.eval()
     mask_token_id = config["data"]["mask_token_id"]
@@ -146,94 +144,6 @@ def evaluate_mdlm(model, eval_dataloader, config: dict, accelerator, num_batches
             "eval_perplexity": torch.exp(torch.tensor(total_loss / total_tokens)).item(),
         }
     return {"eval_loss": 0, "eval_accuracy": 0, "eval_perplexity": 0}
-
-
-@torch.no_grad()
-def evaluate_trm(model, eval_dataloader, config: dict, accelerator, num_batches: int) -> dict:
-    """Run evaluation for TRM (prefix prediction)."""
-    model.eval()
-    trm_cfg = config["trm"]
-    y_len = trm_cfg["y_len"]
-    min_prefix = trm_cfg["min_prefix"]
-
-    total_loss = 0.0
-    total_correct = 0
-    total_tokens = 0
-
-    eval_iter = iter(eval_dataloader)
-    for _ in range(num_batches):
-        try:
-            batch = next(eval_iter)
-        except StopIteration:
-            break
-
-        input_ids = batch["input_ids"]
-        attention_mask = batch["attention_mask"]
-        B, L = input_ids.shape
-        device = input_ids.device
-
-        # Use fixed prefix length for eval consistency (middle of range)
-        max_prefix = L - y_len
-        if max_prefix < min_prefix:
-            continue
-        prefix_len = (min_prefix + max_prefix) // 2
-
-        # Split into prefix and target
-        prefix_ids = input_ids[:, :prefix_len]
-        target_ids = input_ids[:, prefix_len:prefix_len + y_len]
-
-        # Get model (unwrap DDP if needed)
-        m = model.module if hasattr(model, 'module') else model
-
-        # Embed prefix
-        x = m.embeddings(prefix_ids)
-
-        # Initialize y and z
-        y = m.y_init.expand(B, -1, -1) + m.y_pos
-        z = m.z_init.expand(B, -1, -1) + m.z_pos
-
-        # Create attention mask
-        attn_mask = m._create_attention_mask(prefix_len, B, device)
-
-        # Single pass through latent recursion (no deep supervision for eval)
-        y, z = m.latent_recursion(x, y, z, m.n, attn_mask)
-
-        # Get predictions
-        logits = m.output_head(y)  # [B, y_len, V]
-
-        # Compute metrics
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), target_ids.reshape(-1), reduction="sum")
-        preds = logits.argmax(dim=-1)
-        correct = (preds == target_ids).sum()
-
-        total_loss += accelerator.gather(loss).sum().item()
-        total_correct += accelerator.gather(correct).sum().item()
-        total_tokens += accelerator.gather(torch.tensor(B * y_len, device=device)).sum().item()
-
-    model.train()
-
-    if total_tokens > 0:
-        return {
-            "eval_loss": total_loss / total_tokens,
-            "eval_accuracy": total_correct / total_tokens,
-            "eval_perplexity": torch.exp(torch.tensor(total_loss / total_tokens)).item(),
-        }
-    return {"eval_loss": 0, "eval_accuracy": 0, "eval_perplexity": 0}
-
-
-def evaluate(model, eval_dataloader, config: dict, accelerator, num_batches: int, method: str) -> dict:
-    """Run evaluation based on method type."""
-    if method == "trm":
-        return evaluate_trm(model, eval_dataloader, config, accelerator, num_batches)
-    else:
-        return evaluate_mdlm(model, eval_dataloader, config, accelerator, num_batches)
-
-
-class CSVLogger:
-    """Simple CSV logger for training metrics."""
-
-    def __init__(self, filepath: str, fieldnames: list[str]):
-        self.filepath = filepath
         self.fieldnames = fieldnames
 
         # Create directory if needed
@@ -340,68 +250,51 @@ def main():
 
     # Create scheduler
     scheduler = get_scheduler(optimizer, train_cfg["warmup_steps"], total_steps)
-
-    # Prepare with accelerator
-    model, optimizer, dataloader, scheduler = accelerator.prepare(
-        model, optimizer, dataloader, scheduler
+MDLM")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="config.yaml",
+        help="Path to config file",
     )
-    eval_dataloader = accelerator.prepare(eval_dataloader)
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume from",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="outputs",
+        help="Directory for logs and checkpoints",
+    )
+    args = parser.parse_args()
 
-    # Initialize wandb
-    if accelerator.is_main_process:
-        accelerator.init_trackers(
-            project_name="trm-vs-mdlm",
-            config=config,
-            init_kwargs={"wandb": {"name": f"{args.method}-{time.strftime('%Y%m%d-%H%M%S')}"}},
-        )
+    # Load config
+    with open(args.config) as f:
+        config = yaml.safe_load(f)
 
-    # Setup CSV logger (main process only)
-    csv_logger = None
-    if accelerator.is_main_process:
-        csv_path = f"{args.output_dir}/{args.method}/metrics.csv"
-        csv_logger = CSVLogger(
-            csv_path,
-            fieldnames=[
-                "step", "tokens_seen", "flops", "wall_time",
-                "train_loss", "train_accuracy", "lr",
-                "eval_loss", "eval_accuracy", "eval_perplexity",
-            ],
-        )
-        accelerator.print(f"Logging metrics to {csv_path}")
+    train_cfg = config["training"]
 
-    # Resume from checkpoint if specified
-    start_step = 0
-    tokens_seen = 0
-    total_flops = 0
-    if args.resume:
-        accelerator.load_state(args.resume)
-        if "step_" in args.resume:
-            start_step = int(args.resume.split("step_")[-1])
-            tokens_seen = start_step * tokens_per_step
-            total_flops = start_step * flops_per_step
-        accelerator.print(f"Resumed from step {start_step}")
+    # Initialize accelerator
+    accelerator = Accelerator(
+        gradient_accumulation_steps=train_cfg["grad_accum_steps"],
+        log_with="wandb",
+        mixed_precision="bf16",
+    )
 
-    # Training loop
-    start_time = time.time()
-    step = start_step
-    model.train()
+    # Set seed for reproducibility
+    set_seed(train_cfg["seed"])
 
-    accelerator.print(f"Starting training from step {step}")
-    accelerator.print(f"Total tokens target: {train_cfg['total_tokens']:,}")
-    accelerator.print(f"Tokens per step: {tokens_per_step:,}")
-    accelerator.print(f"Total steps: {total_steps:,}")
-    accelerator.print(f"Log train every: {train_cfg['log_train_every']} steps")
-    accelerator.print(f"Log eval every: {train_cfg['log_eval_every']} steps")
+    # Create model
+    model = MDLM(config)
 
-    # Track recent losses for smoothing
-    recent_losses = []
-    recent_accuracies = []
+    # Calculate FLOPs per step
+    flops_per_step = estimate_flops_per_step(config)
 
-    for batch in dataloader:
-        with accelerator.accumulate(model):
-            outputs = model(batch["input_ids"], batch["attention_mask"])
-            loss = outputs["loss"]
-            accelerator.backward(loss)
+    # Log model info
+    total_params = sum(p.numel() for p in model.parameters()
 
             if accelerator.sync_gradients:
                 accelerator.clip_grad_norm_(model.parameters(), 1.0)
@@ -455,15 +348,15 @@ def main():
                     method=args.method,
                 )
 
-                accelerator.print(
-                    f"  Eval | Loss: {eval_metrics['eval_loss']:.4f} | "
-                    f"Acc: {eval_metrics['eval_accuracy']:.4f} | "
-                    f"PPL: {eval_metrics['eval_perplexity']:.2f}"
-                )
+                acceleratomdlm-training",
+            config=config,
+            init_kwargs={"wandb": {"name": f"mdlm-{time.strftime('%Y%m%d-%H%M%S')}"}},
+        )
 
-                # Log to wandb
-                accelerator.log(eval_metrics, step=step)
-
+    # Setup CSV logger (main process only)
+    csv_logger = None
+    if accelerator.is_main_process:
+        csv_path = f"{args.output_dir}/mdlm
                 # Log to CSV (main process only)
                 if csv_logger is not None:
                     avg_loss = sum(recent_losses) / len(recent_losses)
@@ -533,3 +426,39 @@ def main():
 
 if __name__ == "__main__":
     main()
+)
+
+                accelerator.print(
+                    f"  Eval | Loss: {eval_metrics['eval_loss']:.4f} | "
+                    f"Acc: {eval_metrics['eval_accuracy']:.4f} | "
+                    f"PPL: {eval_metrics['eval_perplexity']:.2f}"
+                )
+
+                # Log to wandb
+                accelerator.log(eval_metrics, step=step)
+
+                # Log to CSV (main process only)
+                if csv_logger is not None:
+                    avg_loss = sum(recent_losses) / len(recent_losses)
+                    avg_acc = sum(recent_accuracies) / len(recent_accuracies)
+                    csv_logger.log({
+                        "step": step,
+                        "tokens_seen": tokens_seen,
+                        "flops": total_flops,
+                        "wall_time": wall_time,
+                        "train_loss": avg_loss,
+                        "train_accuracy": avg_acc,
+                        "lr": scheduler.get_last_lr()[0],
+                        "eval_loss": eval_metrics["eval_loss"],
+                        "eval_accuracy": eval_metrics["eval_accuracy"],
+                        "eval_perplexity": eval_metrics["eval_perplexity"],
+                    })
+
+            # Checkpointing
+            if step % train_cfg["save_every"] == 0:
+                checkpoint_dir = f"{args.output_dir}/mdlm)
+    accelerator.print(f"Final eval | Loss: {final_eval['eval_loss']:.4f} | "
+                     f"Acc: {final_eval['eval_accuracy']:.4f}")
+
+    # Final save
+    final_checkpoint = f"{args.output_dir}/mdlm

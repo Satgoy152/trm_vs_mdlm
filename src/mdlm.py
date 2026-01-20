@@ -39,15 +39,58 @@ class MDLM(nn.Module):
             tie_weights=self.embeddings.token_embed.weight,
         )
 
+    def _create_remasked_input(self, masked_input: Tensor, logits: Tensor, mask: Tensor) -> Tensor:
+        """
+        Create input for step 2 by keeping some predictions and remasking others.
+
+        Args:
+            masked_input: [B, L] input from step 1 (with MASK tokens)
+            logits: [B, L, V] predictions from step 1
+            mask: [B, L] boolean mask of originally masked positions
+
+        Returns:
+            new_input_ids: [B, L] input for step 2
+        """
+        # Get predictions
+        preds = logits.argmax(dim=-1)
+
+        # Decide which to keep (50% random)
+        # We fill if it was originally masked AND random < 0.5
+        # Otherwise it stays as MASK token (from masked_input)
+        keep_prob = 0.5
+        rand = torch.rand(mask.shape, device=mask.device)
+        fill_mask = mask & (rand < keep_prob)
+
+        new_input_ids = masked_input.clone()
+        new_input_ids[fill_mask] = preds[fill_mask]
+
+        return new_input_ids
+
+    def _compute_loss(self, logits: Tensor, targets: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Compute loss on originally masked positions.
+        """
+        masked_logits = logits[mask]
+        masked_targets = targets[mask]
+
+        if masked_logits.numel() == 0:
+            loss = torch.tensor(0.0, device=logits.device, requires_grad=True)
+            accuracy = torch.tensor(1.0, device=logits.device)
+        else:
+            loss = F.cross_entropy(masked_logits, masked_targets)
+            preds = masked_logits.argmax(dim=-1)
+            accuracy = (preds == masked_targets).float().mean()
+
+        return loss, accuracy
+
     def forward(self, input_ids: Tensor, attention_mask: Tensor) -> dict:
         """
-        Single training step.
+        Two-step training forward pass.
 
-        1. Sample mask_ratio ~ U(min, max)
-        2. Create mask at random positions
-        3. Replace masked tokens with mask_token_id
-        4. Forward through backbone
-        5. Compute CE loss on masked positions only
+        1. Sample mask and create x_t1
+        2. Step 1 (no_grad): Predict -> x_t2 (keep/remask)
+        3. Step 2 (grad): Predict
+        4. Loss on originally masked tokens
 
         Args:
             input_ids: [B, L] token ids
@@ -59,39 +102,36 @@ class MDLM(nn.Module):
         B, L = input_ids.shape
         device = input_ids.device
 
-        # Sample mask ratio
+        # 1. Initial Masking
         mask_ratio = torch.empty(1).uniform_(self.mask_ratio_min, self.mask_ratio_max).item()
-
+        
         # Create mask (True = masked)
         rand = torch.rand(B, L, device=device)
         mask = (rand < mask_ratio) & (attention_mask == 1)
 
-        # Store original tokens before masking
+        # Store original tokens (ground truth)
         targets = input_ids.clone()
 
-        # Apply mask
+        # Apply initial mask
         masked_input = input_ids.clone()
         masked_input[mask] = self.mask_token_id
 
-        # Forward pass
-        x = self.embeddings(masked_input)
-        hidden = self.backbone(x, attention_mask)
-        logits = self.output_head(hidden)
+        # 2. Step 1: Initial prediction (no gradients)
+        with torch.no_grad():
+            x_1 = self.embeddings(masked_input)
+            hidden_1 = self.backbone(x_1, attention_mask)
+            logits_1 = self.output_head(hidden_1)
+            
+            # Create input for step 2
+            x_t2_input_ids = self._create_remasked_input(masked_input, logits_1, mask)
 
-        # Compute loss only on masked positions
-        masked_logits = logits[mask]  # [num_masked, V]
-        masked_targets = targets[mask]  # [num_masked]
+        # 3. Step 2: Refinement pass (with gradients)
+        x_2 = self.embeddings(x_t2_input_ids)
+        hidden_2 = self.backbone(x_2, attention_mask)
+        logits_2 = self.output_head(hidden_2)
 
-        if masked_logits.numel() == 0:
-            # Edge case: no tokens masked
-            loss = torch.tensor(0.0, device=device, requires_grad=True)
-            accuracy = torch.tensor(1.0, device=device)
-        else:
-            loss = F.cross_entropy(masked_logits, masked_targets)
-
-            # Compute accuracy
-            preds = masked_logits.argmax(dim=-1)
-            accuracy = (preds == masked_targets).float().mean()
+        # 4. Loss calculation (on originally masked positions)
+        loss, accuracy = self._compute_loss(logits_2, targets, mask)
 
         return {
             "loss": loss,

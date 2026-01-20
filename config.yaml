@@ -30,15 +30,6 @@ training:
   save_every: 5000         # Checkpoint every N steps
   seed: 42
 
-# TRM-specific
-trm:
-  n: 6           # latent recursions per deep step
-  T: 3           # deep recursions (T-1 no_grad, 1 with grad)
-  N_sup: 4       # supervision steps per batch
-  y_len: 64      # prediction sequence length (tokens to predict)
-  z_len: 32      # latent reasoning state length
-  min_prefix: 64 # minimum prefix length
-
 # MDLM-specific
 mdlm:
   mask_ratio_min: 0.15
