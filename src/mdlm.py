@@ -39,7 +39,7 @@ class MDLM(nn.Module):
             tie_weights=self.embeddings.token_embed.weight,
         )
 
-    def _create_remasked_input(self, masked_input: Tensor, logits: Tensor, mask: Tensor) -> Tensor:
+    def _create_remasked_input(self, masked_input: Tensor, logits: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
         """
         Create input for step 2 by keeping some predictions and remasking others.
 
@@ -50,6 +50,7 @@ class MDLM(nn.Module):
 
         Returns:
             new_input_ids: [B, L] input for step 2
+            remaining_mask: [B, L] mask of tokens that are still MASK in step 2
         """
         # Get predictions
         preds = logits.argmax(dim=-1)
@@ -60,11 +61,34 @@ class MDLM(nn.Module):
         keep_prob = 0.5
         rand = torch.rand(mask.shape, device=mask.device)
         fill_mask = mask & (rand < keep_prob)
+        
+        remaining_mask = mask & (~fill_mask)
 
         new_input_ids = masked_input.clone()
         new_input_ids[fill_mask] = preds[fill_mask]
 
-        return new_input_ids
+        return new_input_ids, remaining_mask
+
+    def _compute_entropy_stats(self, logits: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Compute mean entropy for masked and unmasked positions.
+        """
+        probs = F.softmax(logits, dim=-1)
+        log_probs = F.log_softmax(logits, dim=-1)
+        entropy = -(probs * log_probs).sum(dim=-1) # [B, L]
+        
+        # Avoid NaN if mask is empty or full
+        if mask.any():
+            mean_masked = entropy[mask].mean()
+        else:
+            mean_masked = torch.tensor(0.0, device=logits.device)
+            
+        if (~mask).any():
+            mean_unmasked = entropy[~mask].mean()
+        else:
+            mean_unmasked = torch.tensor(0.0, device=logits.device)
+            
+        return mean_masked, mean_unmasked
 
     def _compute_loss(self, logits: Tensor, targets: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
         """
@@ -124,8 +148,11 @@ class MDLM(nn.Module):
         # 2.1 Get loss (standard MDLM loss)
         loss_1, accuracy_1 = self._compute_loss(logits_1, targets, mask)
         
+        # 2.2 Compute entropy stats for Step 1
+        ent_masked_1, ent_unmasked_1 = self._compute_entropy_stats(logits_1, mask)
+        
         # Create input for step 2
-        x_t2_input_ids = self._create_remasked_input(masked_input, logits_1.detach(), mask)
+        x_t2_input_ids, mask_2 = self._create_remasked_input(masked_input, logits_1.detach(), mask)
 
         # 3. Step 2: Refinement pass (with gradients)
         x_2 = self.embeddings(x_t2_input_ids)
@@ -135,12 +162,19 @@ class MDLM(nn.Module):
         # 4. Loss calculation (on originally masked positions)
         loss_2, accuracy_2 = self._compute_loss(logits_2, targets, mask)
 
+        # 4.1 Compute entropy stats for Step 2
+        ent_masked_2, ent_unmasked_2 = self._compute_entropy_stats(logits_2, mask_2)
+
         loss = (loss_1 + loss_2) / 2
 
         return {
             "loss": loss,
             "accuracy": (accuracy_1 + accuracy_2) / 2,
             "mask_ratio": mask_ratio,
+            "ent_masked_1": ent_masked_1,
+            "ent_unmasked_1": ent_unmasked_1,
+            "ent_masked_2": ent_masked_2,
+            "ent_unmasked_2": ent_unmasked_2,
         }
 
     @torch.no_grad()

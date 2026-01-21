@@ -257,7 +257,10 @@ def main():
             csv_path,
             fieldnames=[
                 "step", "tokens_seen", "flops", "wall_time",
-                "train_loss", "train_accuracy", "lr",
+                "train_loss", "train_accuracy", 
+                "train_ent_masked_1", "train_ent_unmasked_1",
+                "train_ent_masked_2", "train_ent_unmasked_2",
+                "lr",
                 "eval_loss", "eval_accuracy", "eval_perplexity",
             ],
         )
@@ -290,6 +293,10 @@ def main():
     # Track recent losses for smoothing
     recent_losses = []
     recent_accuracies = []
+    recent_ent_masked_1 = []
+    recent_ent_unmasked_1 = []
+    recent_ent_masked_2 = []
+    recent_ent_unmasked_2 = []
 
     for batch in dataloader:
         with accelerator.accumulate(model):
@@ -312,9 +319,20 @@ def main():
             # Track recent metrics
             recent_losses.append(loss.item())
             recent_accuracies.append(outputs["accuracy"].item())
+            
+            # Additional entropy metrics
+            recent_ent_masked_1.append(outputs["ent_masked_1"].item())
+            recent_ent_unmasked_1.append(outputs["ent_unmasked_1"].item())
+            recent_ent_masked_2.append(outputs["ent_masked_2"].item())
+            recent_ent_unmasked_2.append(outputs["ent_unmasked_2"].item())
+            
             if len(recent_losses) > 100:
                 recent_losses.pop(0)
                 recent_accuracies.pop(0)
+                recent_ent_masked_1.pop(0)
+                recent_ent_unmasked_1.pop(0)
+                recent_ent_masked_2.pop(0)
+                recent_ent_unmasked_2.pop(0)
 
             wall_time = time.time() - start_time
 
@@ -322,10 +340,16 @@ def main():
             if step % train_cfg["log_train_every"] == 0:
                 avg_loss = sum(recent_losses) / len(recent_losses)
                 avg_acc = sum(recent_accuracies) / len(recent_accuracies)
+                
+                avg_ent_m1 = sum(recent_ent_masked_1) / len(recent_ent_masked_1)
+                avg_ent_u1 = sum(recent_ent_unmasked_1) / len(recent_ent_unmasked_1)
+                avg_ent_m2 = sum(recent_ent_masked_2) / len(recent_ent_masked_2)
+                avg_ent_u2 = sum(recent_ent_unmasked_2) / len(recent_ent_unmasked_2)
 
                 accelerator.print(
                     f"Step {step} | Loss: {avg_loss:.4f} | "
                     f"Acc: {avg_acc:.4f} | "
+                    f"Ent(M1/U1): {avg_ent_m1:.2f}/{avg_ent_u1:.2f} | "
                     f"Tokens: {tokens_seen:,} | "
                     f"FLOPs: {total_flops:.2e}"
                 )
@@ -334,6 +358,10 @@ def main():
                 log_dict = {
                     "train_loss": avg_loss,
                     "train_accuracy": avg_acc,
+                    "train_ent_masked_1": avg_ent_m1,
+                    "train_ent_unmasked_1": avg_ent_u1,
+                    "train_ent_masked_2": avg_ent_m2,
+                    "train_ent_unmasked_2": avg_ent_u2,
                     "lr": scheduler.get_last_lr()[0],
                     "tokens_seen": tokens_seen,
                     "flops": total_flops,
@@ -361,6 +389,12 @@ def main():
                 if csv_logger is not None:
                     avg_loss = sum(recent_losses) / len(recent_losses)
                     avg_acc = sum(recent_accuracies) / len(recent_accuracies)
+                    
+                    avg_ent_m1 = sum(recent_ent_masked_1) / len(recent_ent_masked_1)
+                    avg_ent_u1 = sum(recent_ent_unmasked_1) / len(recent_ent_unmasked_1)
+                    avg_ent_m2 = sum(recent_ent_masked_2) / len(recent_ent_masked_2)
+                    avg_ent_u2 = sum(recent_ent_unmasked_2) / len(recent_ent_unmasked_2)
+
                     csv_logger.log({
                         "step": step,
                         "tokens_seen": tokens_seen,
@@ -368,6 +402,10 @@ def main():
                         "wall_time": wall_time,
                         "train_loss": avg_loss,
                         "train_accuracy": avg_acc,
+                        "train_ent_masked_1": avg_ent_m1,
+                        "train_ent_unmasked_1": avg_ent_u1,
+                        "train_ent_masked_2": avg_ent_m2,
+                        "train_ent_unmasked_2": avg_ent_u2,
                         "lr": scheduler.get_last_lr()[0],
                         "eval_loss": eval_metrics["eval_loss"],
                         "eval_accuracy": eval_metrics["eval_accuracy"],
@@ -407,6 +445,10 @@ def main():
             "wall_time": time.time() - start_time,
             "train_loss": sum(recent_losses) / len(recent_losses) if recent_losses else 0,
             "train_accuracy": sum(recent_accuracies) / len(recent_accuracies) if recent_accuracies else 0,
+            "train_ent_masked_1": sum(recent_ent_masked_1) / len(recent_ent_masked_1) if recent_ent_masked_1 else 0,
+            "train_ent_unmasked_1": sum(recent_ent_unmasked_1) / len(recent_ent_unmasked_1) if recent_ent_unmasked_1 else 0,
+            "train_ent_masked_2": sum(recent_ent_masked_2) / len(recent_ent_masked_2) if recent_ent_masked_2 else 0,
+            "train_ent_unmasked_2": sum(recent_ent_unmasked_2) / len(recent_ent_unmasked_2) if recent_ent_unmasked_2 else 0,
             "lr": scheduler.get_last_lr()[0],
             "eval_loss": final_eval["eval_loss"],
             "eval_accuracy": final_eval["eval_accuracy"],
