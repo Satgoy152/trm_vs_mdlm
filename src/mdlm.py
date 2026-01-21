@@ -116,14 +116,16 @@ class MDLM(nn.Module):
         masked_input = input_ids.clone()
         masked_input[mask] = self.mask_token_id
 
-        # 2. Step 1: Initial prediction (no gradients)
-        with torch.no_grad():
-            x_1 = self.embeddings(masked_input)
-            hidden_1 = self.backbone(x_1, attention_mask)
-            logits_1 = self.output_head(hidden_1)
-            
-            # Create input for step 2
-            x_t2_input_ids = self._create_remasked_input(masked_input, logits_1, mask)
+        # 2. Step 1: Initial prediction 
+        x_1 = self.embeddings(masked_input)
+        hidden_1 = self.backbone(x_1, attention_mask)
+        logits_1 = self.output_head(hidden_1)
+
+        # 2.1 Get loss (standard MDLM loss)
+        loss_1, accuracy_1 = self._compute_loss(logits_1, targets, mask)
+        
+        # Create input for step 2
+        x_t2_input_ids = self._create_remasked_input(masked_input, logits_1.detach(), mask)
 
         # 3. Step 2: Refinement pass (with gradients)
         x_2 = self.embeddings(x_t2_input_ids)
@@ -131,11 +133,13 @@ class MDLM(nn.Module):
         logits_2 = self.output_head(hidden_2)
 
         # 4. Loss calculation (on originally masked positions)
-        loss, accuracy = self._compute_loss(logits_2, targets, mask)
+        loss_2, accuracy_2 = self._compute_loss(logits_2, targets, mask)
+
+        loss = (loss_1 + loss_2) / 2
 
         return {
             "loss": loss,
-            "accuracy": accuracy,
+            "accuracy": (accuracy_1 + accuracy_2) / 2,
             "mask_ratio": mask_ratio,
         }
 
