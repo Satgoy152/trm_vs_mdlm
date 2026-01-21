@@ -14,7 +14,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 import yaml
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
@@ -186,11 +186,15 @@ def main():
 
     train_cfg = config["training"]
 
+    # Handle DDP unused parameters for 2-step MDLM training
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+
     # Initialize accelerator
     accelerator = Accelerator(
         gradient_accumulation_steps=train_cfg["grad_accum_steps"],
         log_with="wandb",
         mixed_precision="bf16",
+        kwargs_handlers=[ddp_kwargs],
     )
 
     # Set seed for reproducibility
