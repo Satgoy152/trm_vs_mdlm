@@ -3,7 +3,8 @@
 #SBATCH --output=train_mdlm_2.5b%j.out
 #SBATCH --error=train_mdlm_2.5b%j.err
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=4
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:4
 #SBATCH --partition=spgpu2
 #SBATCH --account=jjparkcv_owned1

@@ -19,7 +19,7 @@ data:
 # Training (shared)
 training:
   total_tokens: 2_500_000_000
-  batch_size: 32
+  batch_size: 8
   lr: 1e-4
   weight_decay: 0.1
   warmup_steps: 2000

@@ -151,25 +151,32 @@ class MDLM(nn.Module):
         # 2.2 Compute entropy stats for Step 1
         ent_masked_1, ent_unmasked_1 = self._compute_entropy_stats(logits_1, mask)
         
-        # Create input for step 2
-        x_t2_input_ids, mask_2 = self._create_remasked_input(masked_input, logits_1.detach(), mask)
+        # # Create input for step 2
+        # x_t2_input_ids, mask_2 = self._create_remasked_input(masked_input, logits_1.detach(), mask)
 
-        # 3. Step 2: Refinement pass (with gradients)
-        x_2 = self.embeddings(x_t2_input_ids)
-        hidden_2 = self.backbone(x_2, attention_mask)
-        logits_2 = self.output_head(hidden_2)
+        # # 3. Step 2: Refinement pass (with gradients)
+        # x_2 = self.embeddings(x_t2_input_ids)
+        # hidden_2 = self.backbone(x_2, attention_mask)
+        # logits_2 = self.output_head(hidden_2)
 
-        # 4. Loss calculation (on originally masked positions)
-        loss_2, accuracy_2 = self._compute_loss(logits_2, targets, mask)
+        # # 4. Loss calculation (on originally masked positions)
+        # loss_2, accuracy_2 = self._compute_loss(logits_2, targets, mask)
 
-        # 4.1 Compute entropy stats for Step 2
-        ent_masked_2, ent_unmasked_2 = self._compute_entropy_stats(logits_2, mask_2)
+        # # 4.1 Compute entropy stats for Step 2
+        # ent_masked_2, ent_unmasked_2 = self._compute_entropy_stats(logits_2, mask_2)
 
-        loss = (loss_1 + loss_2) / 2
+        # loss = (loss_1 + loss_2) / 2
+        # accuracy = (accuracy_1 + accuracy_2) / 2
+        loss = loss_1
+        accuracy = accuracy_1
+
+        ent_masked_2 = ent_masked_1
+        ent_unmasked_2 = ent_unmasked_1
+
 
         return {
             "loss": loss,
-            "accuracy": (accuracy_1 + accuracy_2) / 2,
+            "accuracy": accuracy_1,
             "mask_ratio": mask_ratio,
             "ent_masked_1": ent_masked_1,
             "ent_unmasked_1": ent_unmasked_1,

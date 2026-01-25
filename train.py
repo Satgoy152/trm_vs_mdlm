@@ -252,7 +252,7 @@ def main():
     # Setup CSV logger (main process only)
     csv_logger = None
     if accelerator.is_main_process:
-        csv_path = f"{args.output_dir}/mdlm/metrics.csv"
+        csv_path = f"{args.output_dir}/mdlm_baseline/metrics.csv"
         csv_logger = CSVLogger(
             csv_path,
             fieldnames=[
@@ -414,7 +414,7 @@ def main():
 
             # Checkpointing
             if step % train_cfg["save_every"] == 0:
-                checkpoint_dir = f"{args.output_dir}/mdlm/checkpoints/step_{step}"
+                checkpoint_dir = f"{args.output_dir}/mdlm_baseline/checkpoints/step_{step}"
                 accelerator.save_state(checkpoint_dir)
                 accelerator.print(f"Saved checkpoint to {checkpoint_dir}")
 
@@ -432,7 +432,7 @@ def main():
                      f"Acc: {final_eval['eval_accuracy']:.4f}")
 
     # Final save
-    final_checkpoint = f"{args.output_dir}/mdlm/checkpoints/final"
+    final_checkpoint = f"{args.output_dir}/mdlm_baseline/checkpoints/final"
     accelerator.save_state(final_checkpoint)
     accelerator.print(f"Saved final checkpoint to {final_checkpoint}")
 
